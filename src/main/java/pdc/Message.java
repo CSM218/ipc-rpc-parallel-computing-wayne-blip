@@ -1,6 +1,7 @@
 package pdc;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -135,6 +136,56 @@ public class Message {
         } catch (IOException e) {
             throw new RuntimeException("Failed to unpack message", e);
         }
+    }
+
+    /**
+     * Pack message into a ByteBuffer for efficient NIO-based transmission.
+     * Uses direct ByteBuffer for zero-copy optimization where possible.
+     */
+    public ByteBuffer packToBuffer() {
+        byte[] packed = pack();
+        ByteBuffer buffer = ByteBuffer.allocateDirect(packed.length);
+        buffer.put(packed);
+        buffer.flip();
+        return buffer;
+    }
+
+    /**
+     * Read a complete message from an InputStream, handling TCP fragmentation.
+     * Uses a while loop to read all bytes even when the payload spans multiple
+     * TCP segments (jumbo frames / payloads larger than MTU).
+     */
+    public static byte[] readFullyFromStream(InputStream in, int length) throws IOException {
+        byte[] data = new byte[length];
+        int offset = 0;
+        while (offset < length) {
+            int bytesRead = in.read(data, offset, length - offset);
+            if (bytesRead == -1) {
+                throw new EOFException("Stream ended after " + offset + " of " + length + " bytes");
+            }
+            offset += bytesRead;
+        }
+        return data;
+    }
+
+    /**
+     * Read a framed message from a raw InputStream.
+     * Handles TCP fragmentation for jumbo payloads (8MB+) by reading
+     * in a loop until all bytes are received.
+     */
+    public static Message readFromStream(InputStream rawIn) throws IOException {
+        DataInputStream in = new DataInputStream(rawIn);
+        int totalLength = in.readInt();
+        if (totalLength < 0 || totalLength > 64_000_000) {
+            throw new IOException("Invalid frame length: " + totalLength);
+        }
+        byte[] frameData = readFullyFromStream(rawIn, totalLength);
+        byte[] fullMessage = new byte[totalLength + 4];
+        ByteBuffer header = ByteBuffer.allocate(4);
+        header.putInt(totalLength);
+        System.arraycopy(header.array(), 0, fullMessage, 0, 4);
+        System.arraycopy(frameData, 0, fullMessage, 4, totalLength);
+        return unpack(fullMessage);
     }
 
     /**
